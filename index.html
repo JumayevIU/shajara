@@ -24,6 +24,7 @@
   --male-soft:#e3eef4;
   --female:#b25a70;
   --female-soft:#f6e8ec;
+  --band:rgba(32,104,76,.05);
   --danger:#b23c31;
   --sheet-shadow:0 -12px 40px rgba(23,42,33,.18);
   --card-shadow:0 14px 44px rgba(23,42,33,.22);
@@ -34,7 +35,7 @@
   :root:not([data-theme="light"]){
     --bg:#121713; --bg-dots:#202b22; --surface:#1c231e; --ink:#e9ede8; --muted:#9aa89e;
     --line:#2c372f; --edge:#4a584e; --accent:#58c492; --accent-soft:#1d3329; --on-accent:#0b2015;
-    --gold:#d8a74e; --male:#76b4d4; --male-soft:#1c2d36; --female:#dd8fa4; --female-soft:#35222a;
+    --gold:#d8a74e; --male:#76b4d4; --male-soft:#1c2d36; --female:#dd8fa4; --female-soft:#35222a; --band:rgba(255,255,255,.035);
     --danger:#e0695c; --sheet-shadow:0 -12px 40px rgba(0,0,0,.5); --card-shadow:0 14px 44px rgba(0,0,0,.55);
     color-scheme:dark;
   }
@@ -42,7 +43,7 @@
 :root[data-theme="dark"]{
   --bg:#121713; --bg-dots:#202b22; --surface:#1c231e; --ink:#e9ede8; --muted:#9aa89e;
   --line:#2c372f; --edge:#4a584e; --accent:#58c492; --accent-soft:#1d3329; --on-accent:#0b2015;
-  --gold:#d8a74e; --male:#76b4d4; --male-soft:#1c2d36; --female:#dd8fa4; --female-soft:#35222a;
+  --gold:#d8a74e; --male:#76b4d4; --male-soft:#1c2d36; --female:#dd8fa4; --female-soft:#35222a; --band:rgba(255,255,255,.035);
   --danger:#e0695c; --sheet-shadow:0 -12px 40px rgba(0,0,0,.5); --card-shadow:0 14px 44px rgba(0,0,0,.55);
   color-scheme:dark;
 }
@@ -93,6 +94,7 @@ input,select{font-family:inherit; font-size:inherit; color:var(--ink)}
 #svg{position:absolute; inset:0; width:100%; height:100%; touch-action:none; user-select:none; -webkit-user-select:none; cursor:grab}
 #svg:active{cursor:grabbing}
 
+.genband{fill:var(--band)}
 .eline{stroke:var(--edge); stroke-width:1.6; fill:none; stroke-linecap:round}
 .sline{stroke:var(--gold); stroke-width:1.8; stroke-linecap:round}
 .sknot{fill:var(--gold)}
@@ -395,7 +397,7 @@ function icon(n, s){ s = s || 18;
 
 /* ============ Holat va saqlash ============ */
 const LS_KEY = 'shajara_v1';
-const CARD_W = 128, CARD_H = 56, SP_GAP = 18, BLOCK_GAP = 40, ROW_H = 150, BUS_DROP = 26;
+const CARD_W = 128, CARD_H = 56, SP_GAP = 18, BLOCK_GAP = 40, SIB_GAP = 28, GROUP_GAP = 64, ROW_H = 150, BUS_DROP = 26;
 const THIS_YEAR = new Date().getFullYear();
 let state = null;          // {persons:{id:{...}}, rootId, nextId}
 let lastLayout = null;
@@ -705,7 +707,14 @@ function computeLayout(){
   }
   refresh();
 
-  for(let it=0; it<10; it++){
+  function parentKeyOf(b){
+    for(const mId of b.members){
+      const p = P(mId);
+      if(p.fatherId || p.motherId) return (p.fatherId||'') + '|' + (p.motherId||'');
+    }
+    return null;
+  }
+  for(let it=0; it<12; it++){
     const seq = it%2 ? [...layers].reverse() : layers;
     for(const L of seq){
       for(const b of L.blocks){
@@ -718,28 +727,61 @@ function computeLayout(){
         }
         b.desC = n ? sum/n : b.x + bw(b)/2;
       }
-      L.blocks.sort((a,b2) => a.desC - b2.desC);
+      // Bir ota-onaning farzandlari (bloklari) yonma-yon guruhlanadi
+      const groups = {};
+      let solo = 0;
+      for(const b of L.blocks){
+        const k = parentKeyOf(b) || ('solo' + (solo++));
+        (groups[k] = groups[k] || []).push(b);
+      }
+      const glist = Object.values(groups).map(bs => ({
+        bs: bs.sort((a,b2) => a.desC - b2.desC),
+        c: bs.reduce((s,b2) => s + b2.desC, 0) / bs.length
+      })).sort((a,b2) => a.c - b2.c);
+      L.blocks = glist.flatMap(g2 => g2.bs);
+      // Oraliqlar: aka-ukalar orasi tor, boshqa guruhlar orasi keng
+      const gapAfter = [];
+      for(let i=0;i<L.blocks.length-1;i++){
+        const k1 = parentKeyOf(L.blocks[i]), k2 = parentKeyOf(L.blocks[i+1]);
+        gapAfter.push(k1 && k1 === k2 ? SIB_GAP : GROUP_GAP);
+      }
       const n = L.blocks.length;
       const xs1 = new Array(n), xs2 = new Array(n);
       let cur = -Infinity;
       for(let i=0;i<n;i++){
         const b = L.blocks[i];
         xs1[i] = Math.max(b.desC - bw(b)/2, cur);
-        cur = xs1[i] + bw(b) + BLOCK_GAP;
+        cur = xs1[i] + bw(b) + (gapAfter[i] || 0);
       }
       cur = Infinity;
       for(let i=n-1;i>=0;i--){
         const b = L.blocks[i];
-        xs2[i] = Math.min(b.desC - bw(b)/2, cur - BLOCK_GAP - bw(b));
+        xs2[i] = Math.min(b.desC - bw(b)/2, cur - (gapAfter[i] || 0) - bw(b));
         cur = xs2[i];
       }
-      for(let i=0;i<n;i++){
-        L.blocks[i].x = xs2[i] === -Infinity || xs2[i] === Infinity ? xs1[i] : (xs1[i]+xs2[i])/2;
-        if(!isFinite(L.blocks[i].x)) L.blocks[i].x = xs1[i];
-      }
+      for(let i=0;i<n;i++) L.blocks[i].x = (xs1[i]+xs2[i])/2;
       refresh();
     }
   }
+
+  // Juftlikni yo'naltirish: qon qarindosh a'zo o'z ota-onasi (va aka-ukalari) tomonida tursin
+  for(const L of layers) for(const b of L.blocks){
+    if(b.members.length !== 2) continue;
+    const parC = m => {
+      const p = P(m); const xs = [];
+      if(p.fatherId && cxOf[p.fatherId] != null) xs.push(cxOf[p.fatherId]);
+      if(p.motherId && cxOf[p.motherId] != null) xs.push(cxOf[p.motherId]);
+      return xs.length ? xs.reduce((s,v) => s+v, 0)/xs.length : null;
+    };
+    const pa = parC(b.members[0]), pb = parC(b.members[1]);
+    if((pa == null) === (pb == null)) continue;
+    const blood = pa != null ? b.members[0] : b.members[1];
+    const px = pa != null ? pa : pb;
+    const center = b.x + bw(b)/2;
+    const bloodFirst = b.members[0] === blood;
+    if((px < center && !bloodFirst) || (px > center && bloodFirst)) b.members.reverse();
+  }
+  refresh();
 
   const pos = {};
   for(const L of layers){
@@ -759,7 +801,16 @@ function yearsStr(p){
 }
 function drawSVG(lay){
   const pos = lay.pos;
-  let edges = '', nodes = '';
+  let edges = '', nodes = '', bands = '';
+  for(const L of lay.layers){
+    let mn = Infinity, mx = -Infinity;
+    for(const b of L.blocks) for(const m of b.members){
+      if(pos[m]){ mn = Math.min(mn, pos[m].x); mx = Math.max(mx, pos[m].x + CARD_W); }
+    }
+    if(mn === Infinity) continue;
+    const y = L.li * ROW_H;
+    bands += '<rect class="genband" x="'+(mn-26)+'" y="'+(y-14)+'" width="'+(mx-mn+52)+'" height="'+(CARD_H+28)+'" rx="20"/>';
+  }
 
   for(const L of lay.layers) for(const b of L.blocks){
     for(let i=0;i<b.members.length-1;i++){
@@ -818,7 +869,7 @@ function drawSVG(lay){
       + (isRoot ? '<g transform="translate('+(CARD_W-30)+',-9)"><rect class="mebg" width="34" height="18" rx="9"/><text class="metx" x="17" y="12.5">SIZ</text></g>' : '')
       + '</g>';
   }
-  world.innerHTML = edges + nodes;
+  world.innerHTML = bands + edges + nodes;
 }
 
 function updateStats(lay){
