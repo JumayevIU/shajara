@@ -300,7 +300,7 @@ input,select{font-family:inherit; font-size:inherit; color:var(--ink)}
     <button class="btn primary" id="obStart">Daraxtni boshlash</button>
     <div class="obOr">yoki</div>
     <button class="btn ghost" id="obDemo">Namuna oilani ko'rish</button>
-    <p class="obNote">Prototip: ma'lumotlar faqat shu qurilmaning o'zida saqlanadi.</p>
+    <p class="obNote" id="obNote">Prototip: ma'lumotlar faqat shu qurilmaning o'zida saqlanadi.</p>
   </div>
 </div>
 
@@ -329,7 +329,7 @@ input,select{font-family:inherit; font-size:inherit; color:var(--ink)}
     <button class="iconbtn" id="setClose" aria-label="Yopish"></button>
   </div>
   <div class="settRow" id="settRows"></div>
-  <p class="noteTxt">Bu — Shajara mini app'ining MVP prototipi. Ma'lumotlar hozircha faqat shu qurilmada saqlanadi; keyingi bosqichda umumiy baza va Telegram orqali qarindoshlarni taklif qilish qo'shiladi.</p>
+  <p class="noteTxt" id="settNote"></p>
 </div>
 
 <div id="modal" class="modalWrap" hidden>
@@ -402,7 +402,7 @@ let lastLayout = null;
 let view = {x:0, y:0, k:1};
 let selectedId = null;
 
-function save(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(state)); }catch(e){} }
+function save(){ if(online.active) return; try{ localStorage.setItem(LS_KEY, JSON.stringify(state)); }catch(e){} }
 function loadState(){
   try{
     const s = localStorage.getItem(LS_KEY);
@@ -426,6 +426,111 @@ function linkSpouse(a,b){
   if(!P(b).spouseIds.includes(a)) P(b).spouseIds.push(a);
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+
+/* ============ Onlayn rejim (backend API) ============ */
+// Backend joylangach API_DEFAULT ga haqiqiy manzil yoziladi, masalan 'https://api.shajara.uz'
+const API_DEFAULT = '';
+const API_BASE = new URLSearchParams(location.search).get('api') || API_DEFAULT;
+const DEV_USER = new URLSearchParams(location.search).get('dev'); // "12345:Ism" — faqat lokal sinov
+const online = {candidate:false, active:false, myPersonId:null, inviteUrl:null, inviteCode:null};
+let pendingMutation = false;
+
+function authHeaders(){
+  const h = {'Content-Type':'application/json', 'Accept':'application/json'};
+  if(typeof tg !== 'undefined' && tg && tg.initData) h['Authorization'] = 'tma ' + tg.initData;
+  else if(DEV_USER) h['X-Dev-User'] = DEV_USER;
+  return h;
+}
+async function api(path, method, body){
+  const r = await fetch(API_BASE + path, {
+    method: method || 'GET',
+    headers: authHeaders(),
+    body: body ? JSON.stringify(body) : undefined
+  });
+  let data = null;
+  try{ data = await r.json(); }catch(e){}
+  if(!r.ok){
+    const msg = data && (data.message || data.error) ? (data.message || data.error) : 'Server xatosi (' + r.status + ')';
+    throw new Error(msg);
+  }
+  return data;
+}
+function applyServerState(resp, opts){
+  if(!resp || !resp.in_tree) return false;
+  const st = resp.state;
+  state = {persons: st.persons, rootId: st.my_person_id || st.root_id, nextId: 0};
+  online.active = true;
+  online.myPersonId = st.my_person_id || null;
+  online.inviteUrl = resp.invite_url || null;
+  online.inviteCode = resp.invite_code || null;
+  hideOnboard();
+  rerender(opts);
+  return true;
+}
+async function apiMutate(path, method, body, okMsg){
+  if(pendingMutation) return;
+  pendingMutation = true;
+  try{
+    const resp = await api(path, method, body);
+    closeLayers();
+    const n = resp && resp.in_tree ? Object.keys(resp.state.persons).length : 0;
+    applyServerState(resp, n && n <= 6 ? {fit:true} : undefined);
+    if(okMsg) toast(okMsg);
+  }catch(e){ toast(e.message); }
+  pendingMutation = false;
+}
+async function bootOnline(){
+  $('stats').textContent = '...';
+  const hideLocalOnly = () => {
+    $('obDemo').hidden = true;
+    const d = document.querySelector('.obOr'); if(d) d.hidden = true;
+    $('obNote').textContent = "Daraxtingiz umumiy bazada saqlanadi — keyin qarindoshlaringizni taklif qilib, birga to'ldirasiz.";
+  };
+  try{
+    const resp = await api('/api/state');
+    if(applyServerState(resp, {fit:true})) return;
+    const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
+      || new URLSearchParams(location.search).get('startapp') || '';
+    if(startParam){
+      try{
+        const inv = await api('/api/invites/' + encodeURIComponent(startParam));
+        showJoinScreen(startParam, inv);
+        return;
+      }catch(e){ /* kod noto'g'ri — oddiy onboarding */ }
+    }
+    hideLocalOnly();
+    showOnboard();
+  }catch(e){
+    hideLocalOnly();
+    showOnboard();
+    $('obErr').textContent = "Server bilan aloqa yo'q: " + e.message;
+  }
+}
+function showJoinScreen(code, inv){
+  showOnboard();
+  const card = document.querySelector('.obCard');
+  card.innerHTML = '<div class="obBrand">' + icon('sprout',30) + ' Shajara</div>'
+    + '<h1>Sizni daraxtga taklif qilishdi</h1>'
+    + '<p><b>' + escapeHtml(inv.owner_name || '') + '</b>ning oila daraxti — '
+    + (inv.persons_count || 0) + " a'zo, " + (inv.members_count || 0) + ' foydalanuvchi.</p>'
+    + '<p class="formErr" id="joinErr"></p>'
+    + '<button class="btn primary" id="joinBtn">Daraxtga qo\'shilish</button>'
+    + '<p class="obNote">Qo\'shilgach, daraxtdagi o\'z kartangizni topib «Bu — men» deb belgilang.</p>';
+  $('joinBtn').addEventListener('click', async () => {
+    $('joinBtn').disabled = true;
+    try{
+      const resp = await api('/api/tree/join', 'POST', {code});
+      applyServerState(resp, {fit:true});
+      toast("Xush kelibsiz! O'z kartangizni belgilang");
+    }catch(e){ $('joinErr').textContent = e.message; $('joinBtn').disabled = false; }
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && online.active && !pendingMutation){
+    api('/api/state').then(r => applyServerState(r)).catch(() => {});
+  }
+});
 
 /* ============ Qo'shish amallari ============ */
 function performAdd(role, baseId, d){
@@ -699,7 +804,7 @@ function drawSVG(lay){
 
   for(const id of Object.keys(pos)){
     const p = P(id), pt = pos[id];
-    const isRoot = id === state.rootId;
+    const isRoot = id === state.rootId && !(online.active && !online.myPersonId);
     let nm = p.name || '—';
     if(nm.length > 13) nm = nm.slice(0,12) + '…';
     const cls = 'card ' + p.g + (isRoot?' root':'') + (p.alive?'':' dead');
@@ -872,7 +977,9 @@ function openSheet(id){
   $('shAvatar').textContent = (p.name||'?').charAt(0).toUpperCase();
   $('shAvatar').className = 'pAvatar ' + p.g;
   $('shName').textContent = p.name;
-  $('shRel').textContent = relationLabel(id);
+  const relTxt = (online.active && !online.myPersonId) ? '' : relationLabel(id);
+  $('shRel').textContent = relTxt;
+  $('shRel').parentElement.hidden = !relTxt;
   const bits = [p.g==='m' ? 'Erkak' : 'Ayol'];
   if(p.by) bits.push(p.by + '-yil');
   bits.push(p.alive ? 'hayotda' : 'vafot etgan' + (p.dy ? ' ('+p.dy+')' : ''));
@@ -887,6 +994,7 @@ function openSheet(id){
   acts.push(mk('child','Farzand','down'));
   acts.push(mk('sibling','Aka-uka / singil','users', !(p.fatherId||p.motherId), "Avval ota yoki onasini qo'shing"));
   acts.push(mk('edit','Tahrirlash','pencil'));
+  if(online.active && !online.myPersonId && !p.claimed) acts.push(mk('claim','Bu — men','target'));
   $('shActions').innerHTML = acts.join('');
 
   const del = canDelete(id);
@@ -900,6 +1008,10 @@ function openSheet(id){
       + '<div class="row"><button class="btn small dangerFill" id="delYes">Ha, o\'chirish</button>'
       + '<button class="btn small ghost" id="delNo">Bekor qilish</button></div></div>';
     $('delYes').addEventListener('click', () => {
+      if(online.active){
+        apiMutate('/api/persons/' + id, 'DELETE', null, "O'chirildi: " + p.name);
+        return;
+      }
       doDelete(id); closeLayers(); rerender(); toast("O'chirildi: " + p.name);
     });
     $('delNo').addEventListener('click', () => openSheet(id));
@@ -910,6 +1022,7 @@ function openSheet(id){
       const role = b.getAttribute('data-role');
       if(b.disabled) return;
       if(role === 'edit') openModal({mode:'edit', personId:id});
+      else if(role === 'claim') apiMutate('/api/persons/' + id + '/claim', 'POST', null, 'Belgilandi: bu — siz');
       else openModal({mode:'add', role, baseId:id});
     });
   });
@@ -980,12 +1093,21 @@ $('mSave').addEventListener('click', () => {
   if(by !== null && (by < 1800 || by > THIS_YEAR)){ $('mErr').textContent = "Tug'ilgan yil noto'g'ri"; return; }
   if(dy !== null && (dy < 1800 || dy > THIS_YEAR || (by !== null && dy < by))){ $('mErr').textContent = "Vafot yili noto'g'ri"; return; }
   if(modalCtx.mode === 'edit'){
+    if(online.active){
+      apiMutate('/api/persons/' + modalCtx.personId, 'PATCH', {name, g, by, dy, alive}, 'Saqlandi: ' + name);
+      return;
+    }
     const p = P(modalCtx.personId);
     p.name = name; p.g = g; p.by = by; p.alive = alive; p.dy = dy;
     closeLayers(); rerender(); toast('Saqlandi: ' + name);
   } else {
     const d = {name, g, by, dy, alive};
     if(modalCtx.role === 'child' && !$('f_otherWrap').hidden) d.otherParentId = $('f_other').value || null;
+    if(online.active){
+      apiMutate('/api/persons', 'POST', {role: modalCtx.role, base_id: modalCtx.baseId,
+        other_parent_id: d.otherParentId || null, name, g, by, dy, alive}, "Qo'shildi: " + name);
+      return;
+    }
     performAdd(modalCtx.role, modalCtx.baseId, d);
     closeLayers();
     rerender(Object.keys(state.persons).length <= 6 ? {fit:true} : undefined);
@@ -995,10 +1117,39 @@ $('mSave').addEventListener('click', () => {
 
 /* ============ Sozlamalar ============ */
 function openSettings(){
-  $('settRows').innerHTML =
-    '<button class="btn ghost" id="setDemo">Namuna oilani yuklash</button>'
-    + '<button class="btn ghost" id="setClear" style="color:var(--danger)">Hammasini o\'chirish</button>';
-  $('setDemo').addEventListener('click', () => {
+  let rows = '';
+  if(online.active && (online.inviteUrl || online.inviteCode)){
+    const invShown = online.inviteUrl || ("Taklif kodi: " + online.inviteCode);
+    rows += '<div class="confirmBox"><p style="margin-bottom:6px">Qarindoshlarni taklif qilish</p>'
+      + '<div style="font-size:12.5px; word-break:break-all; color:var(--muted); margin-bottom:10px">' + escapeHtml(invShown) + '</div>'
+      + '<div class="row">'
+      + (online.inviteUrl ? '<button class="btn small primary" id="invShare">Telegramda ulashish</button>' : '')
+      + '<button class="btn small ghost" id="invCopy">Nusxalash</button></div></div>';
+  }
+  if(!online.active){
+    rows += '<button class="btn ghost" id="setDemo">Namuna oilani yuklash</button>'
+      + '<button class="btn ghost" id="setClear" style="color:var(--danger)">Hammasini o\'chirish</button>';
+  }
+  $('settRows').innerHTML = rows;
+  $('settNote').textContent = online.active
+    ? "Daraxt umumiy bazada saqlanadi — taklif havolasi orqali qo'shilgan qarindoshlaringiz ham shu daraxtni ko'radi va to'ldiradi."
+    : "Bu — MVP prototip rejimi: ma'lumotlar faqat shu qurilmada saqlanadi.";
+  if(online.active && (online.inviteUrl || online.inviteCode)){
+    const invValue = online.inviteUrl || online.inviteCode;
+    const sh = $('invShare');
+    if(sh) sh.addEventListener('click', () => {
+      const u = 'https://t.me/share/url?url=' + encodeURIComponent(online.inviteUrl)
+        + '&text=' + encodeURIComponent("Oilamiz shajarasiga qo'shiling!");
+      if(tg && tg.openTelegramLink){ tg.openTelegramLink(u); } else { window.open(u, '_blank'); }
+    });
+    $('invCopy').addEventListener('click', () => {
+      try{
+        navigator.clipboard.writeText(invValue).then(() => toast('Nusxalandi'), () => toast(invValue));
+      }catch(e){ toast(invValue); }
+    });
+  }
+  const sd = $('setDemo');
+  if(sd) sd.addEventListener('click', () => {
     $('settRows').innerHTML =
       '<div class="confirmBox"><p>Hozirgi daraxt o\'rniga namuna oila yuklanadi. Davom etilsinmi?</p>'
       + '<div class="row"><button class="btn small primary" id="demoYes">Ha</button>'
@@ -1006,7 +1157,8 @@ function openSettings(){
     $('demoYes').addEventListener('click', () => { loadDemo(); closeLayers(); });
     $('demoNo').addEventListener('click', openSettings);
   });
-  $('setClear').addEventListener('click', () => {
+  const sc = $('setClear');
+  if(sc) sc.addEventListener('click', () => {
     $('settRows').innerHTML =
       '<div class="confirmBox"><p>Butun daraxt o\'chiriladi. Davom etilsinmi?</p>'
       + '<div class="row"><button class="btn small dangerFill" id="clrYes">Ha, o\'chirish</button>'
@@ -1071,6 +1223,14 @@ $('obStart').addEventListener('click', () => {
   let by = parseInt($('obYear').value, 10);
   if(isNaN(by)) by = null;
   if(by !== null && (by < 1850 || by > THIS_YEAR)){ $('obErr').textContent = "Tug'ilgan yil noto'g'ri"; return; }
+  if(online.candidate){
+    $('obStart').disabled = true;
+    api('/api/tree', 'POST', {name, g: segVal($('obG')), by})
+      .then(resp => { applyServerState(resp, {fit:true}); toast('Daraxt boshlandi — kartangizni bosing'); })
+      .catch(e => { $('obErr').textContent = e.message; })
+      .finally(() => { $('obStart').disabled = false; });
+    return;
+  }
   state = {persons:{}, rootId:null, nextId:1};
   state.rootId = addPerson({name, g:segVal($('obG')), by, alive:true});
   hideOnboard();
@@ -1133,12 +1293,17 @@ if(tg){
 }
 
 /* ============ Ishga tushirish ============ */
-state = loadState();
-if(state){
-  hideOnboard();
-  rerender({fit:true});
+online.candidate = !!API_BASE && !!(tg || DEV_USER);
+if(online.candidate){
+  bootOnline();
 } else {
-  showOnboard();
+  state = loadState();
+  if(state){
+    hideOnboard();
+    rerender({fit:true});
+  } else {
+    showOnboard();
+  }
 }
 applyView();
 </script>

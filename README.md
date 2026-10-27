@@ -16,6 +16,12 @@ Telegram integratsiyasi (`telegram-web-app.js`) himoyalangan: ilova oddiy brauze
 - **Back** tugmasi ochiq oynalarni (varaq/modal) yopadi
 - Foydalanuvchining Telegram ismi onboardingga oldindan yoziladi
 
+## Onlayn rejim
+
+`index.html` dagi `API_DEFAULT` ga [shajara_api](https://github.com/JumayevIU/shajara_api) backendining HTTPS manzili yozilsa, ilova umumiy baza bilan ishlaydi: daraxt yaratish, taklif havolasi orqali qo'shilish, "Bu — men" belgilash. `API_DEFAULT` bo'sh qolsa — avvalgidek faqat qurilmaning o'zida (localStorage) saqlaydigan rejim.
+
+Lokal sinov (Telegramsiz): `index.html?api=http://127.0.0.1:8000&dev=1:Ilhom` — `dev` parametri backendning lokal rejimidagi soxta foydalanuvchi.
+
 ## Lokal ishga tushirish
 
 ```bash
@@ -47,7 +53,8 @@ So'ng brauzerda: `http://localhost:8080`
 
 - [x] MVP prototip: daraxt kiritish va ko'rish (mock/local)
 - [x] Telegram WebApp integratsiyasi
-- [ ] Hosting + BotFather'da ro'yxatdan o'tkazish
-- [ ] Backend (Laravel): umumiy baza, Telegram auth (`initData` tekshiruvi)
-- [ ] Taklif havolasi — qarindoshlar bitta daraxtga qo'shiladi
+- [x] Hosting (GitHub Pages) + BotFather'da ro'yxatdan o'tkazish
+- [x] Backend (Laravel): umumiy baza, Telegram auth — [shajara_api](https://github.com/JumayevIU/shajara_api)
+- [x] Taklif havolasi va "Bu — men" belgilash
+- [ ] Backendni HTTPS hostingga joylash va `API_DEFAULT` ni to'ldirish
 - [ ] Shajara posterini PDF eksport (premium g'oya)
