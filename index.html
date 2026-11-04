@@ -445,9 +445,19 @@ input,select{font-family:inherit; font-size:16px; color:var(--ink)}
         <input type="number" id="f_dy" inputmode="numeric" placeholder="—" enterkeyhint="done">
       </div>
     </div>
+    <div class="twoCol" id="f_extraWrap" hidden>
+      <div class="field">
+        <label for="f_place">Tug'ilgan joyi</label>
+        <input type="text" id="f_place" maxlength="120" placeholder="—" enterkeyhint="done">
+      </div>
+      <div class="field">
+        <label for="f_occ">Kasbi</label>
+        <input type="text" id="f_occ" maxlength="120" placeholder="—" enterkeyhint="done">
+      </div>
+    </div>
     <div class="field" id="f_bioWrap" hidden>
       <label for="f_bio">U haqida (ixtiyoriy)</label>
-      <textarea id="f_bio" maxlength="3000" rows="4" placeholder="Kasbi, hayot yo'li, xotiralar…"></textarea>
+      <textarea id="f_bio" maxlength="3000" rows="4" placeholder="Hayot yo'li, xotiralar…"></textarea>
     </div>
     <p class="formErr" id="mErr"></p>
     <button class="btn primary" id="mSave">Saqlash</button>
@@ -484,7 +494,7 @@ function icon(n, s){ s = s || 18;
 
 /* ============ Holat va saqlash ============ */
 const LS_KEY = 'shajara_v1';
-const APP_VER = '04.11-1'; // Sozlamalarda ko'rinadi — telefonda qaysi versiya ochilganini aniqlash uchun
+const APP_VER = '04.11-2'; // Sozlamalarda ko'rinadi — telefonda qaysi versiya ochilganini aniqlash uchun
 const CARD_W = 128, CARD_H = 56, SP_GAP = 18, BLOCK_GAP = 40, SIB_GAP = 28, GROUP_GAP = 64, ROW_H = 150, BUS_DROP = 26;
 const THIS_YEAR = new Date().getFullYear();
 let state = null;          // {persons:{id:{...}}, rootId, nextId}
@@ -1505,6 +1515,8 @@ function openSheet(id){
   const bits = [p.g==='m' ? 'Erkak' : 'Ayol'];
   if(p.by) bits.push(p.by + '-yil');
   bits.push(p.alive ? 'hayotda' : 'vafot etgan' + (p.dy ? ' ('+p.dy+')' : ''));
+  if(p.birth_place) bits.push(p.birth_place);
+  if(p.occupation) bits.push(p.occupation);
   $('shMeta').textContent = bits.join(' · ');
   const bioEl = $('shBio');
   if(p.bio){ bioEl.textContent = p.bio; bioEl.hidden = false; }
@@ -1629,9 +1641,14 @@ function openModal(ctx){
     $('f_alive').checked = !!p.alive;
     $('f_dy').value = p.dy || '';
     $('f_dyWrap').hidden = !!p.alive;
-    $('f_bioWrap').hidden = false; // "u haqida" faqat tahrirlashda — qo'shish formasi sodda qoladi
+    // "U haqida" maydonlari faqat tahrirlashda — qo'shish formasi sodda qoladi
+    $('f_extraWrap').hidden = false;
+    $('f_place').value = p.birth_place || '';
+    $('f_occ').value = p.occupation || '';
+    $('f_bioWrap').hidden = false;
     $('f_bio').value = p.bio || '';
   } else {
+    $('f_extraWrap').hidden = true;
     $('f_bioWrap').hidden = true;
     const meta = ROLE_META[ctx.role];
     const base = P(ctx.baseId);
@@ -1694,12 +1711,17 @@ $('mSave').addEventListener('click', () => {
   if(dy !== null && (dy < 1800 || dy > THIS_YEAR || (by !== null && dy < by))){ $('mErr').textContent = "Vafot yili noto'g'ri"; return; }
   if(modalCtx.mode === 'edit'){
     const bio = $('f_bio').value.trim() || null;
+    // "" yuborilsa server tozalaydi — forma to'liq almashtirish rejimida ishlaydi
+    const birth_place = $('f_place').value.trim();
+    const occupation = $('f_occ').value.trim();
     if(online.active){
-      apiMutate('/api/persons/' + modalCtx.personId, 'PATCH', {name, g, by, dy, alive, bio}, 'Saqlandi: ' + name);
+      apiMutate('/api/persons/' + modalCtx.personId, 'PATCH',
+        {name, g, by, dy, alive, bio, birth_place, occupation}, 'Saqlandi: ' + name);
       return;
     }
     const p = P(modalCtx.personId);
     p.name = name; p.g = g; p.by = by; p.alive = alive; p.dy = dy; p.bio = bio;
+    p.birth_place = birth_place || null; p.occupation = occupation || null;
     closeLayers(); rerender(); toast('Saqlandi: ' + name);
   } else {
     const d = {name, g, by, dy, alive};
@@ -1974,9 +1996,12 @@ function openSettings(){
             + '<span style="display:flex;gap:6px;flex-wrap:wrap">'
             + '<button class="btn small ghost memCard" data-id="' + m.id + '">Kartasi</button>'
             + (m.self ? '<span class="memSelf">siz</span>'
-                : ('<button class="btn small ghost memRole" data-id="' + m.id + '" data-r="'
-                    + (m.role === 'editor' ? 'viewer' : 'editor') + '">'
-                    + (m.role === 'editor' ? "Faqat ko'rsin" : 'Tahrir berish') + '</button>'
+                // Tahrirlash huquqi kartaga bog'liq: kartasiz a'zoga rol tugmasi yo'q
+                : ((m.person_id
+                    ? '<button class="btn small ghost memRole" data-id="' + m.id + '" data-r="'
+                      + (m.role === 'editor' ? 'viewer' : 'editor') + '">'
+                      + (m.role === 'editor' ? "Faqat ko'rsin" : 'Tahrir berish') + '</button>'
+                    : '')
                   + '<button class="btn small ghost memKick" data-id="' + m.id + '">Chiqarish</button>'))
             + '</span></div>';
         }).join('')
@@ -2047,9 +2072,11 @@ function openSettings(){
   document.querySelectorAll('.jrOk').forEach(b => {
     b.addEventListener('click', () => {
       const p = b.getAttribute('data-p');
+      // Rol yuborilmaydi — server hal qiladi: karta bilan editor, kartasiz viewer
       apiMutate('/api/join-requests/' + b.getAttribute('data-id') + '/approve', 'POST',
-        p ? {person_id: p, role: 'viewer'} : {role: 'viewer'},
-        "Qabul qilindi — u endi daraxtni ko'radi");
+        p ? {person_id: p} : {},
+        p ? "Qabul qilindi — u shajarani to'ldira oladi"
+          : "Qabul qilindi — u daraxtni ko'radi");
     });
   });
   document.querySelectorAll('.jrNo').forEach(b => {
@@ -2159,9 +2186,12 @@ function pickMemberCard(m){
   $('mcSave').addEventListener('click', () => {
     const v = $('mcSel').value;
     if(v === (m.person_id || '')){ openSettings(); return; }
+    // Birinchi karta -> server a'zoni editor qiladi; olib tashlash -> viewer
     apiMutate('/api/tree/members/' + m.id, 'PATCH',
       v ? {person_id: v} : {clear_person: true},
-      v ? 'Belgilandi — endi u o\'zini daraxtda ko\'radi' : 'Bog\'lash olib tashlandi');
+      v ? (m.person_id ? 'Belgilandi'
+           : 'Belgilandi — endi u shajarani tahrirlay oladi')
+        : "Olib tashlandi — endi u shajarani faqat ko'radi");
   });
   $('mcBack').addEventListener('click', openSettings);
 }
