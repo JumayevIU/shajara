@@ -274,6 +274,7 @@ input,select{font-family:inherit; font-size:16px; color:var(--ink)}
 .seg button{padding:10px; border-radius:12px; border:1.5px solid var(--line); background:var(--bg); font-weight:700; font-size:13.5px}
 .seg button.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent)}
 .seg button:disabled{opacity:.5; cursor:default}
+.mcSel{width:100%; padding:10px 12px; border-radius:12px; border:1.5px solid var(--line); background:var(--bg); color:inherit; font:inherit; font-size:16px}
 .switchRow{display:flex; align-items:center; justify-content:space-between; gap:10px; padding:11px 13px; border:1.5px solid var(--line); border-radius:12px; background:var(--bg)}
 .switchRow span{font-weight:700; font-size:13.5px}
 .switchRow input{width:20px; height:20px; accent-color:var(--accent)}
@@ -483,7 +484,7 @@ function icon(n, s){ s = s || 18;
 
 /* ============ Holat va saqlash ============ */
 const LS_KEY = 'shajara_v1';
-const APP_VER = '29.10-21'; // Sozlamalarda ko'rinadi — telefonda qaysi versiya ochilganini aniqlash uchun
+const APP_VER = '04.11-1'; // Sozlamalarda ko'rinadi — telefonda qaysi versiya ochilganini aniqlash uchun
 const CARD_W = 128, CARD_H = 56, SP_GAP = 18, BLOCK_GAP = 40, SIB_GAP = 28, GROUP_GAP = 64, ROW_H = 150, BUS_DROP = 26;
 const THIS_YEAR = new Date().getFullYear();
 let state = null;          // {persons:{id:{...}}, rootId, nextId}
@@ -524,8 +525,16 @@ const API_BASE = new URLSearchParams(location.search).get('api') || API_DEFAULT;
 const DEV_USER = new URLSearchParams(location.search).get('dev'); // "12345:Ism" — faqat lokal sinov
 const ADMIN_TREE = new URLSearchParams(location.search).get('admin_tree'); // admin ko'rish rejimi
 let readOnly = false;
-const online = {candidate:false, active:false, myPersonId:null, inviteUrl:null, inviteCode:null, isOwner:false, members:[]};
+const online = {candidate:false, active:false, myPersonId:null, inviteUrl:null, inviteCode:null,
+  isOwner:false, role:'', members:[], joinRequests:[], scopeId:''};
+let myProfile = null;  // GET /api/me dagi profil
+let waitTimer = null;  // qo'shilish so'rovini kutish ekranining poll'i
 let pendingMutation = false;
+
+/* Rol: owner va editor tahrirlaydi, viewer faqat ko'radi (server ham 403 qaytaradi) */
+function canEditTree(){
+  return !readOnly && (!online.active || online.role === 'owner' || online.role === 'editor');
+}
 
 function authHeaders(){
   const h = {'Content-Type':'application/json', 'Accept':'application/json'};
@@ -549,6 +558,7 @@ async function api(path, method, body){
 }
 function applyServerState(resp, opts){
   if(!resp || !resp.in_tree) return false;
+  stopWaitPoll();
   const st = resp.state;
   state = {persons: st.persons, rootId: st.my_person_id || st.root_id, nextId: 0};
   online.active = true;
@@ -556,7 +566,11 @@ function applyServerState(resp, opts){
   online.inviteUrl = resp.invite_url || null;
   online.inviteCode = resp.invite_code || null;
   online.isOwner = !!resp.is_owner;
+  // role kelmasa (eski backend): eski xatti-harakat — ega owner, qolganlar editor
+  online.role = resp.role || (resp.is_owner ? 'owner' : 'editor');
   online.members = resp.members || [];
+  online.joinRequests = resp.join_requests || [];
+  online.scopeId = st.root_id || '';
   hideOnboard();
   rerender(opts);
   return true;
@@ -573,84 +587,230 @@ async function apiMutate(path, method, body, okMsg){
   }catch(e){ toast(e.message); }
   pendingMutation = false;
 }
+/* ---- Onlayn onboarding (v2): profil → havola/moslik → so'rov → daraxt ---- */
+function obScreen(html){
+  showOnboard();
+  document.querySelector('.obCard').innerHTML =
+    '<div class="obBrand">' + icon('sprout',30) + ' Shajara</div>' + html;
+}
+function obField(id, label, ph, val){
+  return '<div class="field"><label for="' + id + '">' + label + '</label>'
+    + '<input type="text" id="' + id + '" maxlength="100" placeholder="' + escapeHtml(ph)
+    + '" autocomplete="off" enterkeyhint="done" value="' + escapeHtml(val || '') + '"></div>';
+}
+function stopWaitPoll(){ if(waitTimer){ clearInterval(waitTimer); waitTimer = null; } }
+
 async function bootOnline(){
   $('stats').textContent = '...';
-  const hideLocalOnly = () => {
-    $('obDemo').hidden = true;
-    const d = document.querySelector('.obOr'); if(d) d.hidden = true;
-    $('obNote').textContent = "Daraxtingiz umumiy bazada saqlanadi — keyin qarindoshlaringizni taklif qilib, birga to'ldirasiz.";
-  };
+  stopWaitPoll();
   try{
     const resp = await api('/api/state');
     if(applyServerState(resp, {fit:true})) return;
+    let me = null;
+    try{ me = await api('/api/me'); }catch(e){} // eski backend 404 bersa — profilsiz davom
+    myProfile = me && me.profile ? me.profile : null;
     const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param)
       || new URLSearchParams(location.search).get('startapp') || '';
-    if(startParam){
-      // "KOD" yoki shaxsiy havola "KOD_p12"
-      const parts = startParam.split('_');
-      const code = parts[0];
-      const invPerson = parts[1] && /^p\d+$/i.test(parts[1]) ? parts[1].toLowerCase() : null;
-      try{
-        const inv = await api('/api/invites/' + encodeURIComponent(code)
-          + (invPerson ? '?person=' + invPerson : ''));
-        showJoinScreen(code, inv, invPerson);
-        return;
-      }catch(e){ /* kod noto'g'ri — oddiy onboarding */ }
-    }
-    hideLocalOnly();
-    showOnboard();
+    const code = startParam ? startParam.split('_')[0] : ''; // eski "KOD_p12" dan ham faqat kod olinadi
+    if(!myProfile){ showProfileScreen(code); return; }
+    if(me && me.pending_request){ showWaitScreen(me.pending_request); return; }
+    if(code){ openInvite(code); return; }
+    showStartScreen();
   }catch(e){
-    hideLocalOnly();
-    showOnboard();
-    $('obErr').textContent = "Server bilan aloqa yo'q: " + e.message;
+    obScreen('<h1>Server bilan aloqa yo\'q</h1>'
+      + '<p>' + escapeHtml(e.message) + "</p><p class='obNote'>Internetni tekshirib, qayta urinib ko'ring.</p>"
+      + '<button class="btn primary" id="obRetry">Qayta urinish</button>');
+    $('obRetry').addEventListener('click', bootOnline);
   }
 }
-function showJoinScreen(code, inv, invPerson){
-  showOnboard();
-  const card = document.querySelector('.obCard');
 
-  // Shaxsiy havola: karta hali bo'sh bo'lsa — "Siz X misiz?" oqimi
-  const target = invPerson && inv.person && !inv.person.claimed ? inv.person : null;
-  if(target){
-    card.innerHTML = '<div class="obBrand">' + icon('sprout',30) + ' Shajara</div>'
-      + '<h1>Siz ' + escapeHtml(target.name) + 'misiz?</h1>'
-      + '<p><b>' + escapeHtml(inv.owner_name || '') + '</b>ning oila daraxtida sizga karta ajratilgan: <b>'
-      + escapeHtml(target.name) + '</b>' + (target.by ? ' (' + target.by + '-yil)' : '')
-      + ". Qo'shilsangiz, bu karta sizniki bo'ladi va daraxtni o'z tomoningizdan davom ettirasiz.</p>"
-      + '<p class="formErr" id="joinErr"></p>'
-      + '<button class="btn primary" id="joinBtn">Ha, bu — men. Qo\'shilish</button>'
-      + '<button class="btn ghost" id="joinOtherBtn" style="margin-top:8px">Men boshqa odamman</button>';
-    $('joinBtn').addEventListener('click', async () => {
-      $('joinBtn').disabled = true;
+/* 1-qadam: profil — hamma narsadan oldin to'ldiriladi */
+function showProfileScreen(code){
+  const p = myProfile || {};
+  const tgName = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user
+    && tg.initDataUnsafe.user.first_name) || '';
+  obScreen('<h1>Avval o\'zingiz haqingizda</h1>'
+    + "<p>Bu ma'lumotlar sizni shajarada to'g'ri joylashtirish uchun kerak.</p>"
+    + obField('pLast', 'Familiyangiz', 'Masalan: Jumayev', p.last_name)
+    + obField('pFirst', 'Ismingiz', 'Masalan: Ilhom', p.first_name || tgName)
+    + obField('pPatro', 'Otangizning ismi', 'Masalan: Baxtiyor', p.patronymic)
+    + '<div class="field"><label>Jinsingiz</label><div class="seg" id="pG">'
+    + '<button type="button" data-v="m" class="' + (p.g === 'f' ? '' : 'on') + '">Erkak</button>'
+    + '<button type="button" data-v="f" class="' + (p.g === 'f' ? 'on' : '') + '">Ayol</button></div></div>'
+    + '<div class="field"><label for="pBy">Tug\'ilgan yilingiz</label>'
+    + '<input type="number" id="pBy" inputmode="numeric" placeholder="1992" enterkeyhint="done" value="'
+    + (p.by || '') + '"></div>'
+    + obField('pPlace', "Tug'ilgan joyingiz (ixtiyoriy)", "Masalan: Buxoro, G'ijduvon", p.birth_place)
+    + '<p class="formErr" id="pErr"></p>'
+    + '<button class="btn primary" id="pSave">Davom etish</button>');
+  $('pSave').addEventListener('click', async () => {
+    const body = {
+      last_name: $('pLast').value.trim(),
+      first_name: $('pFirst').value.trim(),
+      patronymic: $('pPatro').value.trim(),
+      g: segVal($('pG')),
+      by: parseInt($('pBy').value, 10) || null,
+      birth_place: $('pPlace').value.trim() || null
+    };
+    if(!body.last_name){ $('pErr').textContent = 'Familiyangizni kiriting'; return; }
+    if(!body.first_name){ $('pErr').textContent = 'Ismingizni kiriting'; return; }
+    if(!body.patronymic){ $('pErr').textContent = "Otangizning ismini kiriting"; return; }
+    if(!body.by || body.by < 1850 || body.by > THIS_YEAR){
+      $('pErr').textContent = "Tug'ilgan yilni to'g'ri kiriting"; return;
+    }
+    $('pSave').disabled = true;
+    try{
+      const me = await api('/api/me', 'PUT', body);
+      myProfile = me.profile;
+      if(me.pending_request){ showWaitScreen(me.pending_request); return; }
+      if(code){ openInvite(code); return; }
+      showStartScreen();
+    }catch(e){ $('pErr').textContent = e.message; $('pSave').disabled = false; }
+  });
+}
+
+/* 2-qadam: boshlash — yaratish yoki havola orqali qo'shilish */
+function showStartScreen(){
+  obScreen('<h1>Oilangiz daraxtini tuzing</h1>'
+    + "<p>O'zingizdan boshlang — qarindoshlaringizni taklif qilib, bitta umumiy shajarani birga to'ldirasiz.</p>"
+    + '<p class="formErr" id="stErr"></p>'
+    + '<button class="btn primary" id="stCreate">Shajara yaratish</button>'
+    + '<div class="obOr">yoki</div>'
+    + obField('stCode', "Havola orqali qo'shilish", 'Taklif kodi yoki havola', '')
+    + '<button class="btn ghost" id="stJoin">Qo\'shilish</button>'
+    + '<p class="obNote">Daraxtingiz umumiy bazada saqlanadi — qarindoshlaringiz ham shu daraxtni ko\'radi va to\'ldiradi.</p>');
+  $('stCreate').addEventListener('click', async () => {
+    $('stCreate').disabled = true;
+    try{
+      // Avval moslik qidiramiz: balki oilangiz daraxti allaqachon bor
+      let matches = [];
       try{
-        const resp = await api('/api/tree/join', 'POST', {code, person_id: target.id});
-        applyServerState(resp, {fit:true});
-        toast(resp.notice || ('Xush kelibsiz, ' + target.name + '!'));
-      }catch(e){ $('joinErr').textContent = e.message; $('joinBtn').disabled = false; }
-    });
-    $('joinOtherBtn').addEventListener('click', () => showJoinScreen(code, inv, null));
-    return;
-  }
+        const r = await api('/api/me/matches');
+        matches = (r && r.matches) || [];
+      }catch(e){} // eski backend'da endpoint bo'lmasa — to'g'ridan-to'g'ri yaratish
+      if(matches.length){ showMatchesScreen(matches); return; }
+      await createTreeNow(m => { $('stErr').textContent = m; $('stCreate').disabled = false; });
+    }catch(e){ $('stErr').textContent = e.message; $('stCreate').disabled = false; }
+  });
+  $('stJoin').addEventListener('click', () => {
+    const raw = $('stCode').value.trim();
+    if(!raw){ $('stErr').textContent = 'Taklif kodi yoki havolani kiriting'; return; }
+    // To'liq havoladan ham kodni sug'urib olamiz: ...?startapp=KOD yoki KOD_p12
+    let code = raw;
+    const m = raw.match(/startapp=([A-Za-z0-9_]+)/);
+    if(m) code = m[1];
+    code = code.split('_')[0].toUpperCase();
+    openInvite(code, msg => { $('stErr').textContent = msg; });
+  });
+}
 
-  const bandNote = invPerson && inv.person && inv.person.claimed
-    ? '<p class="formErr">Havola mo\'ljallangan karta allaqachon band — qo\'shilib, daraxtdan o\'zingizni toping.</p>'
-    : '';
-  card.innerHTML = '<div class="obBrand">' + icon('sprout',30) + ' Shajara</div>'
-    + '<h1>Sizni daraxtga taklif qilishdi</h1>'
+async function createTreeNow(onErr){
+  const name = (myProfile.first_name + ' ' + (myProfile.last_name || '')).trim();
+  try{
+    const resp = await api('/api/tree', 'POST', {name, g: myProfile.g, by: myProfile.by});
+    applyServerState(resp, {fit:true});
+    toast('Daraxt boshlandi — kartangizni bosing');
+  }catch(e){ if(onErr) onErr(e.message); else toast(e.message); }
+}
+
+/* 3-qadam: moslik topildi — mavjud shajaraga so'rov yuborish taklifi */
+function showMatchesScreen(matches){
+  obScreen('<h1>Sizga o\'xshash karta topildi</h1>'
+    + "<p>Quyidagi shajarada siz bo'lishingiz mumkin bo'lgan karta bor. So'rov yuborsangiz, daraxt egasi tasdiqlagach qo'shilasiz — shunda oila bitta daraxtda yig'iladi.</p>"
+    + '<p class="formErr" id="mtErr"></p>'
+    + matches.map((m, i) => {
+        const pr = m.person || {};
+        return '<div class="confirmBox" style="text-align:left">'
+          + '<p style="margin:0 0 2px"><b>' + escapeHtml(m.owner_name || '—') + '</b>ning shajarasi'
+          + ' <small>· ' + (m.persons_count || 0) + ' karta</small></p>'
+          + '<p style="margin:0 0 10px"><b>' + escapeHtml(pr.name || '') + '</b>'
+          + (pr.by ? ' (' + pr.by + ')' : '')
+          + (pr.relation ? ' — ega ' + escapeHtml(pr.relation) : '') + '</p>'
+          + '<button class="btn small primary mtReq" data-i="' + i + '">So\'rov yuborish</button>'
+          + '</div>';
+      }).join('')
+    + '<button class="btn ghost" id="mtNew" style="margin-top:10px">Bular men emas — yangi shajara yaratish</button>');
+  document.querySelectorAll('.mtReq').forEach(b => {
+    b.addEventListener('click', async () => {
+      const m = matches[parseInt(b.getAttribute('data-i'), 10)];
+      b.disabled = true;
+      try{
+        const me = await api('/api/join-requests', 'POST',
+          {tree_id: m.tree_id, person_id: m.person && m.person.id});
+        if(me.pending_request) showWaitScreen(me.pending_request);
+      }catch(e){ $('mtErr').textContent = e.message; b.disabled = false; }
+    });
+  });
+  $('mtNew').addEventListener('click', () => {
+    $('mtNew').disabled = true;
+    createTreeNow(msg => { $('mtErr').textContent = msg; $('mtNew').disabled = false; });
+  });
+}
+
+/* 4-qadam: so'rov yuborildi — ega tasdiqlashini kutamiz (10 soniyada poll) */
+function showWaitScreen(pending){
+  stopWaitPoll();
+  obScreen('<h1>So\'rov yuborildi</h1>'
+    + '<p><b>' + escapeHtml(pending.owner_name || 'Daraxt egasi') + '</b> tasdiqlashini kuting — '
+    + "tasdiqlagach daraxt shu yerda ochiladi. Unga bot xabar yubordi.</p>"
+    + '<div class="obOr"></div>'
+    + '<p class="formErr" id="wtErr"></p>'
+    + '<button class="btn ghost" id="wtCancel">So\'rovni bekor qilish</button>');
+  $('wtCancel').addEventListener('click', async () => {
+    $('wtCancel').disabled = true;
+    stopWaitPoll();
+    try{
+      await api('/api/join-requests/' + pending.id, 'DELETE');
+      toast("So'rov bekor qilindi");
+      showStartScreen();
+    }catch(e){ $('wtErr').textContent = e.message; $('wtCancel').disabled = false; }
+  });
+  waitTimer = setInterval(async () => {
+    try{
+      const resp = await api('/api/state');
+      if(resp && resp.in_tree){
+        applyServerState(resp, {fit:true});
+        toast('Sizni shajaraga qo\'shishdi!');
+        return;
+      }
+      const me = await api('/api/me');
+      if(!me.pending_request){
+        stopWaitPoll();
+        toast("So'rov rad etildi — o'z shajarangizni yaratishingiz mumkin");
+        showStartScreen();
+      }
+    }catch(e){}
+  }, 10000);
+}
+
+/* Havola bilan kelgan odam: avval ko'rinish, keyin qo'shilish (viewer bo'lib) */
+async function openInvite(code, onErr){
+  try{
+    const inv = await api('/api/invites/' + encodeURIComponent(code));
+    showJoinScreen(code, inv);
+  }catch(e){
+    if(onErr){ onErr(e.message); return; }
+    showStartScreen();
+    const el = $('stErr'); if(el) el.textContent = e.message;
+  }
+}
+function showJoinScreen(code, inv){
+  obScreen('<h1>Sizni daraxtga taklif qilishdi</h1>'
     + '<p><b>' + escapeHtml(inv.owner_name || '') + '</b>ning oila daraxti — '
-    + (inv.persons_count || 0) + " a'zo, " + (inv.members_count || 0) + ' foydalanuvchi.</p>'
-    + bandNote
+    + (inv.persons_count || 0) + " karta, " + (inv.members_count || 0) + ' foydalanuvchi.</p>'
     + '<p class="formErr" id="joinErr"></p>'
     + '<button class="btn primary" id="joinBtn">Daraxtga qo\'shilish</button>'
-    + '<p class="obNote">Qo\'shilgach, daraxtdagi o\'z kartangizni topib «Bu — men» deb belgilang.</p>';
+    + '<button class="btn ghost" id="joinBack" style="margin-top:8px">Orqaga</button>'
+    + '<p class="obNote">Qo\'shilgach daraxtni ko\'rasiz; kim ekaningizni daraxt egasi belgilaydi.</p>');
   $('joinBtn').addEventListener('click', async () => {
     $('joinBtn').disabled = true;
     try{
       const resp = await api('/api/tree/join', 'POST', {code});
       applyServerState(resp, {fit:true});
-      toast("Xush kelibsiz! O'z kartangizni belgilang");
+      toast("Xush kelibsiz! Daraxt egasi sizni belgilaydi");
     }catch(e){ $('joinErr').textContent = e.message; $('joinBtn').disabled = false; }
   });
+  $('joinBack').addEventListener('click', showStartScreen);
 }
 /* Admin ko'rish rejimi: istalgan daraxtni faqat o'qish uchun ochadi */
 async function adminBoot(){
@@ -800,7 +960,48 @@ function relationLabel(id){
 let hiddenBranches = new Set();
 let hiddenLoadedScope = null;
 const HIDE_KEY = 'shajara_hidden_v1';
-function hiddenScope(){ return online.active ? ('t' + (online.inviteCode || '')) : 'local'; }
+function hiddenScope(){ return online.active ? ('t' + (online.scopeId || online.inviteCode || '')) : 'local'; }
+
+/* ---- Kuyov-kelinlarning oilasi (faqat shu qurilmadagi ko'rinish) ----
+   Standart: BERKITILGAN — daraxt yonga emas, yuqoriga/pastga o'sadi.
+   Ko'rinadiganlar: markaz (mening kartam yoki ildiz) ajdodlari, shu
+   ajdodlarning barcha avlodlari (qon qarindoshlar) va ularning juftlari. */
+const INLAW_KEY = 'shajara_inlaws_v1';
+function inlawsShown(){
+  try{
+    const all = JSON.parse(localStorage.getItem(INLAW_KEY) || '{}');
+    return !!all[hiddenScope()];
+  }catch(e){ return false; }
+}
+function setInlawsShown(v){
+  try{
+    const all = JSON.parse(localStorage.getItem(INLAW_KEY) || '{}');
+    all[hiddenScope()] = !!v;
+    localStorage.setItem(INLAW_KEY, JSON.stringify(all));
+  }catch(e){}
+}
+function inlawAllowedSet(){
+  if(readOnly || inlawsShown()) return null; // admin hammasini ko'radi
+  const center = state.rootId;
+  if(!center || !state.persons[center]) return null;
+  const anc = new Set([center]);
+  const qa = [center];
+  while(qa.length){
+    const p = P(qa.shift());
+    for(const n of [p.fatherId, p.motherId])
+      if(n && state.persons[n] && !anc.has(n)){ anc.add(n); qa.push(n); }
+  }
+  const blood = new Set(anc);
+  const qd = [...anc];
+  while(qd.length){
+    for(const c of childrenOf(qd.shift()))
+      if(!blood.has(c)){ blood.add(c); qd.push(c); }
+  }
+  const vis = new Set(blood);
+  for(const id of blood)
+    for(const sp of P(id).spouseIds) if(state.persons[sp]) vis.add(sp);
+  return vis;
+}
 function loadHiddenIfNeeded(){
   const sc = hiddenScope();
   if(hiddenLoadedScope === sc) return;
@@ -849,6 +1050,7 @@ function parentKeyOf(b){
 }
 function computeLayout(){
   loadHiddenIfNeeded();
+  const allowed = inlawAllowedSet(); // null — hamma ko'rinadi
   const ids = Object.keys(state.persons);
   const gen = {}; gen[state.rootId] = 0;
   const q = [state.rootId];
@@ -856,7 +1058,9 @@ function computeLayout(){
     const id = q.shift(); const p = P(id); const g = gen[id];
     // Berkitilgan odam ko'rinadi, lekin uning ortidagi shox ochilmaydi
     if(hiddenBranches.has(id) && id !== state.rootId) continue;
-    const push = (n, ng) => { if(n && state.persons[n] && !(n in gen)){ gen[n] = ng; q.push(n); } };
+    const push = (n, ng) => {
+      if(n && state.persons[n] && !(n in gen) && (!allowed || allowed.has(n))){ gen[n] = ng; q.push(n); }
+    };
     push(p.fatherId, g+1); push(p.motherId, g+1);
     p.spouseIds.forEach(s2 => push(s2, g));
     childrenOf(id).forEach(c => push(c, g-1));
@@ -1160,7 +1364,7 @@ function centerOnMe(){
 }
 function centerOnPerson(id){
   if(!lastLayout) return;
-  if(!lastLayout.pos[id]){ toast("Bu odam berkitilgan shox ichida — avval shoxni oching"); return; }
+  if(!lastLayout.pos[id]){ toast("Bu odam hozir berkitilgan — shoxni yoki sozlamalardan kuyov-kelin oilalarini oching"); return; }
   const pt = lastLayout.pos[id];
   const r = svg.getBoundingClientRect();
   if(view.k < 0.75) view.k = 1;
@@ -1315,19 +1519,17 @@ function openSheet(id){
   acts.push(mk('child','Farzand','down'));
   acts.push(mk('sibling','Aka-uka / singil','users', !(p.fatherId||p.motherId), "Avval ota yoki onasini qo'shing"));
   acts.push(mk('edit','Tahrirlash','pencil'));
-  if(online.active && !online.myPersonId && !p.claimed) acts.push(mk('claim','Bu — men','target'));
-  if(online.active && !p.claimed && (online.inviteUrl || online.inviteCode))
-    acts.push(mk('invite','Taklif havolasi','link'));
-  if(id !== state.rootId){
+  if(!canEditTree()) acts.length = 0; // viewer va admin — tahrirlash amallari yo'q
+  if(!readOnly && id !== state.rootId){
+    // Shox berkitish — faqat shu qurilmadagi ko'rinish, viewer'ga ham mumkin
     if(hiddenBranches.has(id)) acts.push(mk('branch', "Shoxni ko'rsatish", 'eye'));
     else if(hiddenCountIf(id) > 0) acts.push(mk('branch', 'Shoxni berkitish', 'eyeoff'));
   }
-  if(readOnly) acts.length = 0; // admin ko'rinishi — faqat o'qish
-  document.querySelector('#sheet .actLabel').hidden = readOnly;
+  document.querySelector('#sheet .actLabel').hidden = !acts.length;
   $('shActions').innerHTML = acts.join('');
 
   const del = canDelete(id);
-  $('shDanger').innerHTML = (readOnly || id === state.rootId) ? '' :
+  $('shDanger').innerHTML = (!canEditTree() || id === state.rootId) ? '' :
     '<button class="dangerBtn" id="shDelete">'+icon('trash')+"<span>O'chirish</span></button>";
   const delBtn = $('shDelete');
   if(delBtn) delBtn.addEventListener('click', () => {
@@ -1351,8 +1553,6 @@ function openSheet(id){
       const role = b.getAttribute('data-role');
       if(b.disabled) return;
       if(role === 'edit') openModal({mode:'edit', personId:id});
-      else if(role === 'claim') apiMutate('/api/persons/' + id + '/claim', 'POST', null, 'Belgilandi: bu — siz');
-      else if(role === 'invite') showPersonInvite(id);
       else if(role === 'branch'){
         const turnOn = !hiddenBranches.has(id);
         if(turnOn) hiddenBranches.add(id); else hiddenBranches.delete(id);
@@ -1371,31 +1571,6 @@ function openSheet(id){
   $('sheet').hidden = false;
 }
 $('shClose').addEventListener('click', closeLayers);
-
-/* Shaxsiy taklif havolasi: havolani ochgan qarindosh aynan shu kartani oladi */
-function showPersonInvite(id){
-  const p = P(id);
-  const link = online.inviteUrl ? online.inviteUrl + '_' + id : null;
-  const shown = link || ('Taklif kodi: ' + online.inviteCode + '_' + id);
-  const msg = "Assalomu alaykum! Oilamiz shajarasida sizning kartangiz bor — havolani ochib, daraxtni birga to'ldiring.";
-  $('shDanger').innerHTML =
-    '<div class="confirmBox"><p><b>' + escapeHtml(p.name) + '</b> uchun shaxsiy havola tayyor</p>'
-    + '<p class="invNote" style="margin:6px 0 10px">Ochgan odam darhol shu kartani oladi — havolani faqat o\'sha kishiga yuboring.'
-    + (link ? '' : '<br>' + escapeHtml(shown)) + '</p>'
-    + '<div class="row">'
-    + (link ? '<button class="btn small primary" id="pInvShare">Telegramda yuborish</button>' : '')
-    + '<button class="btn small ghost" id="pInvCopy">Nusxalash</button>'
-    + '</div></div>';
-  const sh = $('pInvShare');
-  if(sh) sh.addEventListener('click', () => {
-    const u = 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent(msg);
-    if(tg && tg.openTelegramLink){ tg.openTelegramLink(u); } else { window.open(u, '_blank'); }
-  });
-  $('pInvCopy').addEventListener('click', () => {
-    navigator.clipboard.writeText(link || (online.inviteCode + '_' + id))
-      .then(() => toast('Nusxalandi'), () => toast(shown));
-  });
-}
 
 /* ============ Modal (qo'shish / tahrirlash) ============ */
 let modalCtx = null;
@@ -1771,16 +1946,39 @@ function openSettings(){
       + (online.isOwner ? '<button class="btn small ghost" id="invRotate">Yangi havola</button>' : '')
       + '</div></div>';
   }
-  if(online.active && online.isOwner && online.members.length > 1){
+  if(online.active && online.isOwner && online.joinRequests.length){
+    rows += '<div class="confirmBox"><p style="margin-bottom:4px">Qo\'shilish so\'rovlari</p>'
+      + online.joinRequests.map(j => {
+          const pr = j.profile || {};
+          const line = [pr.last_name, pr.first_name, pr.patronymic].filter(Boolean).join(' ')
+            + (pr.by ? ' · ' + pr.by : '') + (pr.birth_place ? ' · ' + pr.birth_place : '');
+          const cardNm = j.person_id && state.persons[j.person_id]
+            ? state.persons[j.person_id].name : null;
+          return '<div class="memRow" style="flex-wrap:wrap;gap:8px"><span class="memName"><b>'
+            + escapeHtml(j.name) + '</b><br><small>' + escapeHtml(line)
+            + (cardNm ? '<br>Mos karta: <b>' + escapeHtml(cardNm) + '</b>' : '') + '</small></span>'
+            + '<span style="display:flex;gap:6px">'
+            + '<button class="btn small primary jrOk" data-id="' + j.id + '" data-p="' + (j.person_id || '') + '">Qabul qilish</button>'
+            + '<button class="btn small ghost jrNo" data-id="' + j.id + '">Rad etish</button></span></div>';
+        }).join('')
+      + '</div>';
+  }
+  if(online.active && online.isOwner && online.members.length){
     rows += '<div class="confirmBox"><p style="margin-bottom:4px">A\'zolar — daraxtni kim ko\'radi</p>'
       + online.members.map(m => {
           const pn = m.person_id && state.persons[m.person_id]
             ? state.persons[m.person_id].name : 'karta tanlanmagan';
-          return '<div class="memRow"><span class="memName">' + escapeHtml(m.name)
-            + ' <small>· ' + escapeHtml(pn) + '</small></span>'
-            + (m.self ? '<span class="memSelf">siz (ega)</span>'
-                      : '<button class="btn small ghost memKick" data-id="' + m.id + '">Chiqarish</button>')
-            + '</div>';
+          const roleTxt = m.role === 'owner' ? 'ega' : (m.role === 'editor' ? 'tahrirlaydi' : "ko'radi");
+          return '<div class="memRow" style="flex-wrap:wrap;gap:8px"><span class="memName">' + escapeHtml(m.name)
+            + ' <small>· ' + escapeHtml(pn) + ' · ' + roleTxt + '</small></span>'
+            + '<span style="display:flex;gap:6px;flex-wrap:wrap">'
+            + '<button class="btn small ghost memCard" data-id="' + m.id + '">Kartasi</button>'
+            + (m.self ? '<span class="memSelf">siz</span>'
+                : ('<button class="btn small ghost memRole" data-id="' + m.id + '" data-r="'
+                    + (m.role === 'editor' ? 'viewer' : 'editor') + '">'
+                    + (m.role === 'editor' ? "Faqat ko'rsin" : 'Tahrir berish') + '</button>'
+                  + '<button class="btn small ghost memKick" data-id="' + m.id + '">Chiqarish</button>'))
+            + '</span></div>';
         }).join('')
       + '</div>';
   }
@@ -1795,6 +1993,10 @@ function openSettings(){
       ? (alone ? "Daraxtni butunlay o'chirish" : null)
       : 'Daraxtdan chiqish';
     if(leaveLabel) rows += '<button class="btn ghost" id="setLeave" style="color:var(--danger)">' + leaveLabel + '</button>';
+  }
+  if(state){
+    rows += '<button class="btn ghost" id="setInlaws">Kuyov-kelinlarning oilasi: '
+      + (inlawsShown() ? "<b>ko'rsatilgan</b>" : "<b>berkitilgan</b>") + '</button>';
   }
   rows += '<button class="btn ghost" id="setPdf">PDF yuklab olish</button>';
   rows += '<button class="btn ghost" id="setDiag">Diagnostika</button>';
@@ -1828,6 +2030,40 @@ function openSettings(){
       apiMutate('/api/tree/members/' + b.getAttribute('data-id'), 'DELETE', null,
         "Chiqarildi — endi u daraxtni ko'rmaydi");
     });
+  });
+  document.querySelectorAll('.memRole').forEach(b => {
+    b.addEventListener('click', () => {
+      const r = b.getAttribute('data-r');
+      apiMutate('/api/tree/members/' + b.getAttribute('data-id'), 'PATCH', {role: r},
+        r === 'editor' ? 'Endi u shajarani tahrirlay oladi' : "Endi u shajarani faqat ko'radi");
+    });
+  });
+  document.querySelectorAll('.memCard').forEach(b => {
+    b.addEventListener('click', () => {
+      const m = online.members.find(x => String(x.id) === b.getAttribute('data-id'));
+      if(m) pickMemberCard(m);
+    });
+  });
+  document.querySelectorAll('.jrOk').forEach(b => {
+    b.addEventListener('click', () => {
+      const p = b.getAttribute('data-p');
+      apiMutate('/api/join-requests/' + b.getAttribute('data-id') + '/approve', 'POST',
+        p ? {person_id: p, role: 'viewer'} : {role: 'viewer'},
+        "Qabul qilindi — u endi daraxtni ko'radi");
+    });
+  });
+  document.querySelectorAll('.jrNo').forEach(b => {
+    b.addEventListener('click', () => {
+      if(!b.dataset.c){ b.dataset.c = '1'; b.textContent = 'Rostdanmi?'; return; }
+      apiMutate('/api/join-requests/' + b.getAttribute('data-id') + '/reject', 'POST', null,
+        "So'rov rad etildi");
+    });
+  });
+  const si = $('setInlaws');
+  if(si) si.addEventListener('click', () => {
+    setInlawsShown(!inlawsShown());
+    rerender({fit:true});
+    openSettings();
   });
   const sd = $('setDemo');
   if(sd) sd.addEventListener('click', () => {
@@ -1867,6 +2103,7 @@ function openSettings(){
         state = null;
         online.myPersonId = null; online.members = []; online.isOwner = false;
         online.inviteUrl = null; online.inviteCode = null;
+        online.role = ''; online.joinRequests = []; online.scopeId = '';
         world.innerHTML = '';
         $('stats').textContent = '—';
         closeLayers();
@@ -1905,6 +2142,30 @@ function openSettings(){
   backdrop.hidden = false;
   $('settingsSheet').hidden = false;
 }
+/* A'zoni daraxtdagi kartaga bog'lash: bo'sh kartalardan tanlanadi */
+function pickMemberCard(m){
+  const opts = Object.values(state.persons)
+    .filter(p => !p.claimed || p.id === m.person_id)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  $('settRows').innerHTML =
+    '<div class="confirmBox"><p style="margin-bottom:8px"><b>' + escapeHtml(m.name) + '</b> daraxtda kim?</p>'
+    + '<select id="mcSel" class="mcSel"><option value="">— tanlanmagan —</option>'
+    + opts.map(p => '<option value="' + p.id + '"' + (p.id === m.person_id ? ' selected' : '') + '>'
+        + escapeHtml(p.name) + (p.by ? ' (' + p.by + ')' : '') + '</option>').join('')
+    + '</select>'
+    + '<div class="row" style="margin-top:10px">'
+    + '<button class="btn small primary" id="mcSave">Saqlash</button>'
+    + '<button class="btn small ghost" id="mcBack">Orqaga</button></div></div>';
+  $('mcSave').addEventListener('click', () => {
+    const v = $('mcSel').value;
+    if(v === (m.person_id || '')){ openSettings(); return; }
+    apiMutate('/api/tree/members/' + m.id, 'PATCH',
+      v ? {person_id: v} : {clear_person: true},
+      v ? 'Belgilandi — endi u o\'zini daraxtda ko\'radi' : 'Bog\'lash olib tashlandi');
+  });
+  $('mcBack').addEventListener('click', openSettings);
+}
+
 /* Qurilma holati — uzoqdan nosozlik aniqlash uchun */
 function diagText(){
   const vv = window.visualViewport;
